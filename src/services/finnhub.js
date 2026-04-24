@@ -1,5 +1,6 @@
 const API_KEY = import.meta.env.VITE_FINNHUB_API_KEY
 const TWELVEDATA_API_KEY = import.meta.env.VITE_TWELVEDATA_API_KEY
+const GOOGLE_SHEETS_QUOTES_URL = import.meta.env.VITE_GOOGLE_SHEETS_QUOTES_URL
 const BASE_URL = 'https://finnhub.io/api/v1'
 const TWELVEDATA_BASE_URL = 'https://api.twelvedata.com'
 
@@ -24,6 +25,66 @@ export function getDisplayTicker(symbol) {
 
 function toTwelveDataTsxSymbol(symbol) {
   return `${getDisplayTicker(symbol)}:TSX`
+}
+
+async function fetchStockPriceFromGoogleSheets(symbol) {
+  if (!GOOGLE_SHEETS_QUOTES_URL) return null
+
+  try {
+    const response = await fetch(GOOGLE_SHEETS_QUOTES_URL)
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    const payload = await response.json()
+    const rows = Array.isArray(payload) ? payload : Array.isArray(payload.data) ? payload.data : []
+    const match = rows.find((row) => String(row.symbol || '').trim().toUpperCase() === getDisplayTicker(symbol))
+    const current = Number(match?.price) || 0
+
+    if (!current) {
+      return null
+    }
+
+    return {
+      current,
+      previousClose: current,
+      change: 0,
+      changePercent: 0,
+      source: 'google-sheets',
+    }
+  } catch (error) {
+    console.error(`Error fetching Google Sheets price for ${symbol}:`, error)
+    return null
+  }
+}
+
+export async function syncGoogleSheetsSymbol(symbol) {
+  if (!GOOGLE_SHEETS_QUOTES_URL) return false
+
+  const displaySymbol = getDisplayTicker(symbol)
+  if (!displaySymbol) return false
+
+  try {
+    const response = await fetch(GOOGLE_SHEETS_QUOTES_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify({
+        symbol: displaySymbol,
+        google_symbol: `TSE:${displaySymbol}`,
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    return true
+  } catch (error) {
+    console.error(`Error syncing Google Sheets symbol for ${symbol}:`, error)
+    return false
+  }
 }
 
 async function fetchStockPriceFromTwelveData(symbol) {
@@ -56,6 +117,11 @@ async function fetchStockPriceFromTwelveData(symbol) {
 }
 
 export async function fetchStockPrice(symbol) {
+  const googleSheetsQuote = await fetchStockPriceFromGoogleSheets(symbol)
+  if (googleSheetsQuote) {
+    return googleSheetsQuote
+  }
+
   const twelveDataQuote = await fetchStockPriceFromTwelveData(symbol)
   if (twelveDataQuote) {
     return twelveDataQuote

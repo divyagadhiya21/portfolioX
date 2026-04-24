@@ -34,6 +34,7 @@ cp .env.example .env
 - `VITE_SUPABASE_ANON_KEY`
 - `VITE_FINNHUB_API_KEY`
 - `VITE_TWELVEDATA_API_KEY` for better TSX live price coverage
+- `VITE_GOOGLE_SHEETS_QUOTES_URL` for a free Google Sheets price feed
 
 3. Run locally:
 
@@ -43,6 +44,18 @@ npm run dev
 ```
 
 Open the URL from terminal (usually `http://localhost:5173`).
+
+## Free Google Sheets quotes
+
+If you use `VITE_GOOGLE_SHEETS_QUOTES_URL`, the app now:
+
+- reads TSX prices from your Google Sheet
+- auto-registers new stock symbols in that sheet when you save a trade
+
+Your Apps Script web app should support:
+
+- `GET` to return rows as JSON
+- `POST` with `{ "symbol": "MDA", "google_symbol": "TSE:MDA" }` to append the symbol if it does not already exist
 
 ## Supabase permissions
 

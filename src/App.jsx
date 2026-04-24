@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 import { supabase } from './services/supabase'
-import { fetchMultiplePrices, fetchStockPrice, getDisplayTicker, searchCanadianStocks, toTsxSymbol } from './services/finnhub'
+import { fetchMultiplePrices, fetchStockPrice, getDisplayTicker, searchCanadianStocks, syncGoogleSheetsSymbol, toTsxSymbol } from './services/finnhub'
 
 const MAX_DECIMAL_VALUE = 99999999
 
@@ -58,6 +58,12 @@ function formatQuantity(value) {
 
 function formatDate(value) {
   if (!value) return '--'
+
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split('-').map(Number)
+    return dateFormatter.format(new Date(year, month - 1, day))
+  }
+
   return dateFormatter.format(new Date(value))
 }
 
@@ -827,6 +833,22 @@ function App() {
         setTrades((prev) => [data, ...prev])
       }
 
+      const didSyncSheet = await syncGoogleSheetsSymbol(stock)
+      if (!didSyncSheet) {
+        console.warn(`Google Sheets symbol sync skipped or failed for ${stock}.`)
+      }
+
+      try {
+        const refreshedQuote = await fetchStockPrice(stock)
+        setPricesByStock((prev) => ({
+          ...prev,
+          [stock]: refreshedQuote,
+        }))
+        setStockPreviewPrice(Number(refreshedQuote.current) > 0 ? refreshedQuote.current : null)
+      } catch (quoteError) {
+        console.error('Post-save quote refresh failed:', quoteError)
+      }
+
       setSelectedStock(stock)
       setDetailPage(1)
       closeTradeModal()
@@ -1012,6 +1034,10 @@ function App() {
                   <div className="stock-metric">
                     <span>Qty Held</span>
                     <strong>{formatQuantity(stock.sharesHeld)}</strong>
+                  </div>
+                  <div className="stock-metric">
+                    <span>Buy Price</span>
+                    <strong>{formatCurrency(stock.avgBuyPrice)}</strong>
                   </div>
                   <div className="stock-metric">
                     <span>Current Price</span>
