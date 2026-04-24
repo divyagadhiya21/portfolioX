@@ -11,12 +11,17 @@ export const useStockPrices = (tickers = []) => {
     const data = await fetchMultiplePrices(tickers);
     setPrices(data);
     setLoading(false);
-  }, [tickers.join(',')]);
+  }, [tickers]);
 
   useEffect(() => {
-    refresh();
+    const timeoutId = setTimeout(() => {
+      void refresh();
+    }, 0);
     const interval = setInterval(refresh, 60000); // refresh every 60s
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(timeoutId);
+      clearInterval(interval);
+    };
   }, [refresh]);
 
   return { prices, loading, refresh };

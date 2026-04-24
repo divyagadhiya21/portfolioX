@@ -25,9 +25,35 @@ export const usePortfolio = () => {
 
   // Load data when user logs in
   useEffect(() => {
-    if (!user) { setTrades([]); setAlerts([]); return; }
-    getTrades(user.id).then(setTrades).catch(console.error);
-    getAlerts(user.id).then(setAlerts).catch(console.error);
+    let cancelled = false;
+
+    async function loadPortfolio() {
+      if (!user) {
+        setTrades([]);
+        setAlerts([]);
+        return;
+      }
+
+      try {
+        const [nextTrades, nextAlerts] = await Promise.all([
+          getTrades(user.id),
+          getAlerts(user.id),
+        ]);
+
+        if (!cancelled) {
+          setTrades(nextTrades);
+          setAlerts(nextAlerts);
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    }
+
+    void loadPortfolio();
+
+    return () => {
+      cancelled = true;
+    };
   }, [user]);
 
   const handleAddTrade = async (trade) => {
