@@ -34,6 +34,13 @@ h3 {
   color: var(--text);
 }
 
+.build-tag {
+  margin-top: 6px;
+  color: var(--text2);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -45,6 +52,7 @@ h3 {
   display: grid;
   grid-template-columns: 2fr 1fr;
   gap: 14px;
+  margin-bottom: 14px;
 }
 
 .card {
@@ -52,6 +60,10 @@ h3 {
   border: 1px solid var(--border);
   border-radius: var(--r3);
   padding: 16px;
+}
+
+.panel {
+  min-height: 120px;
 }
 
 .chip {
@@ -63,12 +75,6 @@ h3 {
   border: 1px solid var(--border2);
 }
 
-.chip.positive {
-  background: var(--green-bg);
-  color: var(--green);
-  border-color: var(--green-border);
-}
-
 .chip.neutral {
   background: var(--blue-bg);
   color: var(--blue);
@@ -78,8 +84,9 @@ h3 {
 .panel-head {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   margin-bottom: 12px;
+  gap: 10px;
 }
 
 .panel-head small {
@@ -103,19 +110,6 @@ th {
   font-weight: 500;
 }
 
-.up {
-  color: var(--green);
-}
-
-.down {
-  color: var(--red);
-}
-
-.side-col {
-  display: grid;
-  gap: 14px;
-}
-
 .trade-form {
   display: grid;
   gap: 10px;
@@ -128,7 +122,8 @@ label {
   font-size: 13px;
 }
 
-input {
+input,
+select {
   background: var(--bg3);
   border: 1px solid var(--border2);
   color: var(--text);
@@ -136,26 +131,50 @@ input {
   padding: 10px;
 }
 
-.primary-btn {
-  background: var(--accent);
+.primary-btn,
+.ghost-btn,
+.danger-btn {
   border: none;
-  color: #fff;
-  padding: 10px 14px;
+  padding: 9px 12px;
   border-radius: var(--r2);
   font-weight: 600;
 }
 
-.alerts {
-  list-style: none;
-  display: grid;
-  gap: 8px;
-  padding: 0;
-  margin: 0;
+.primary-btn {
+  background: var(--accent);
+  color: #fff;
 }
 
-.alerts li {
-  background: var(--bg3);
-  border: 1px solid var(--border);
+.ghost-btn {
+  background: var(--blue-bg);
+  color: var(--blue);
+}
+
+.danger-btn {
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.primary-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.empty {
+  color: var(--text2);
+  padding: 8px 0;
+}
+
+.error {
+  margin: 10px 0 14px;
+  color: var(--red);
+  background: var(--red-bg);
+  border: 1px solid var(--red-border);
   border-radius: var(--r2);
   padding: 10px;
 }
@@ -170,7 +189,7 @@ input {
     grid-template-columns: 1fr;
   }
 
-  .topbar {
-    flex-direction: column;
+  .actions {
+    flex-wrap: wrap;
   }
 }
