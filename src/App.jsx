@@ -62,6 +62,9 @@ function aggregateHoldings(trades) {
 
 function getFriendlyErrorMessage(error) {
   const rawMessage = error?.message || ''
+  const details = error?.details ? ` Details: ${error.details}` : ''
+  const hint = error?.hint ? ` Hint: ${error.hint}` : ''
+  const code = error?.code ? ` [${error.code}]` : ''
 
   if (rawMessage.toLowerCase().includes('invalid login credentials')) {
     return 'Invalid email or password. Use the Supabase user you created, or create a new account.'
@@ -72,10 +75,10 @@ function getFriendlyErrorMessage(error) {
   }
 
   if (rawMessage.toLowerCase().includes('permission denied')) {
-    return 'Supabase is still blocking this request. Double-check that the row-level security policies were created for the authenticated role.'
+    return `Supabase is still blocking this request.${code} ${rawMessage}${details}${hint}`.trim()
   }
 
-  return rawMessage || 'Something went wrong while talking to Supabase.'
+  return `${rawMessage}${details}${hint}`.trim() || 'Something went wrong while talking to Supabase.'
 }
 
 function isValidDecimalInput(value) {
@@ -133,6 +136,7 @@ function App() {
         setSession(nextSession)
         setUser(nextSession?.user ?? null)
       } catch (err) {
+        console.error('Supabase session restore failed:', err)
         if (active) {
           setAuthError(getFriendlyErrorMessage(err))
         }
@@ -183,6 +187,7 @@ function App() {
           setTrades(Array.isArray(data) ? data : [])
         }
       } catch (err) {
+        console.error('Supabase trades load failed:', err)
         if (!cancelled) {
           setError(getFriendlyErrorMessage(err))
         }
@@ -251,6 +256,7 @@ function App() {
 
       setAuthForm(defaultAuthForm)
     } catch (err) {
+      console.error('Supabase auth submit failed:', err)
       setAuthError(getFriendlyErrorMessage(err))
     } finally {
       setAuthSubmitting(false)
@@ -266,6 +272,7 @@ function App() {
       if (signOutError) throw signOutError
       resetTradeForm()
     } catch (err) {
+      console.error('Supabase sign out failed:', err)
       setAuthError(getFriendlyErrorMessage(err))
     }
   }
@@ -326,6 +333,7 @@ function App() {
 
       resetTradeForm()
     } catch (err) {
+      console.error('Supabase save trade failed:', err)
       setError(getFriendlyErrorMessage(err))
     } finally {
       setSaving(false)
@@ -360,6 +368,7 @@ function App() {
       setTrades((prev) => prev.filter((trade) => trade.id !== id))
       if (editingId === id) resetTradeForm()
     } catch (err) {
+      console.error('Supabase delete trade failed:', err)
       setError(getFriendlyErrorMessage(err))
     }
   }
