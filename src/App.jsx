@@ -13,6 +13,7 @@ const defaultForm = {
 }
 
 const toNumber = (v) => Number.parseFloat(v || 0)
+const MAX_DECIMAL_VALUE = 99999999
 
 function getFriendlyErrorMessage(err) {
   const rawMessage = err?.message || ''
@@ -22,6 +23,14 @@ function getFriendlyErrorMessage(err) {
   }
 
   return rawMessage || 'Something went wrong while talking to Supabase.'
+}
+
+function isValidDecimalInput(value) {
+  if (value === '') return false
+  if (!/^\d+(\.\d{1,4})?$/.test(value)) return false
+
+  const numericValue = Number(value)
+  return numericValue >= 0 && numericValue <= MAX_DECIMAL_VALUE
 }
 
 function aggregateHoldings(trades) {
@@ -153,6 +162,11 @@ function App() {
       return
     }
 
+    if (!isValidDecimalInput(form.qty) || !isValidDecimalInput(form.price)) {
+      setError('Quantity and price must be between 0 and 99999999, with up to 4 decimal places and no negative values.')
+      return
+    }
+
     const payload = {
       stock: form.stock.toUpperCase().trim(),
       qty: toNumber(form.qty),
@@ -281,11 +295,11 @@ function App() {
             </label>
             <label>
               Quantity
-              <input name="qty" type="number" placeholder="1" min="0.0001" step="0.0001" value={form.qty} onChange={onChange} />
+              <input name="qty" type="number" placeholder="1" min="0" max={MAX_DECIMAL_VALUE} step="0.0001" value={form.qty} onChange={onChange} />
             </label>
             <label>
               Price
-              <input name="price" type="number" placeholder="200" min="0.0001" step="0.01" value={form.price} onChange={onChange} />
+              <input name="price" type="number" placeholder="200" min="0" max={MAX_DECIMAL_VALUE} step="0.0001" value={form.price} onChange={onChange} />
             </label>
             <label>
               Type
