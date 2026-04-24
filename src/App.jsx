@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 import { supabase } from './services/supabase'
-import { fetchMultiplePrices } from './services/finnhub'
+import { fetchMultiplePrices, fetchStockPrice, getDisplayTicker, searchCanadianStocks, toTsxSymbol } from './services/finnhub'
 
 const MAX_DECIMAL_VALUE = 99999999
 
@@ -18,9 +18,9 @@ const defaultAuthForm = {
   password: '',
 }
 
-const currencyFormatter = new Intl.NumberFormat('en-IN', {
+const currencyFormatter = new Intl.NumberFormat('en-CA', {
   style: 'currency',
-  currency: 'INR',
+  currency: 'CAD',
   maximumFractionDigits: 2,
 })
 
@@ -91,7 +91,13 @@ function isValidDecimalInput(value) {
 }
 
 function getStockInitials(stock) {
-  return String(stock || '').slice(0, 2).toUpperCase() || '--'
+  return getDisplayTicker(stock).slice(0, 2).toUpperCase() || '--'
+}
+
+function getVisiblePageNumbers(currentPage, totalPages, maxVisible = 8) {
+  const startPage = Math.floor((currentPage - 1) / maxVisible) * maxVisible + 1
+  const endPage = Math.min(totalPages, startPage + maxVisible - 1)
+  return Array.from({ length: endPage - startPage + 1 }, (_, index) => startPage + index)
 }
 
 function buildChartPoints(stockData) {
@@ -112,7 +118,7 @@ function buildChartPoints(stockData) {
 
 function buildPortfolioModel(trades, pricesByStock) {
   const groupedTrades = trades.reduce((acc, trade) => {
-    const stock = String(trade.stock || '').toUpperCase()
+    const stock = toTsxSymbol(trade.stock)
     if (!stock) return acc
     acc[stock] ||= []
     acc[stock].push({
@@ -132,8 +138,9 @@ function buildPortfolioModel(trades, pricesByStock) {
 
     const market = pricesByStock[stock] || {}
     const fallbackPrice = sortedEntries.at(-1)?.price || 0
-    const currentPrice = market.current || fallbackPrice
-    const previousClose = market.previousClose || currentPrice
+    const hasLivePrice = Number(market.current) > 0
+    const currentPrice = hasLivePrice ? Number(market.current) : fallbackPrice
+    const previousClose = Number(market.previousClose) > 0 ? Number(market.previousClose) : currentPrice
 
     const openLots = []
     const buyEntryMap = new Map()
@@ -243,8 +250,10 @@ function buildPortfolioModel(trades, pricesByStock) {
 
     return {
       stock,
+      displayStock: getDisplayTicker(stock),
       currentPrice,
       previousClose,
+      hasLivePrice,
       entryCount: tradeRows.length,
       activeEntries: activeEntries.length,
       sharesHeld,
@@ -355,6 +364,8 @@ function LineChart({ stockData }) {
 }
 
 function App() {
+  const ENTRIES_PER_PAGE = 10
+  const HISTORY_ENTRIES_PER_PAGE = 5
   const [user, setUser] = useState(null)
   const [authMode, setAuthMode] = useState('signIn')
   const [authForm, setAuthForm] = useState(defaultAuthForm)
@@ -374,15 +385,70 @@ function App() {
   const [isTradeModalOpen, setIsTradeModalOpen] = useState(false)
   const [pricesByStock, setPricesByStock] = useState({})
   const [priceLoading, setPriceLoading] = useState(false)
+  const [showStockSuggestions, setShowStockSuggestions] = useState(false)
+  const [apiStockSuggestions, setApiStockSuggestions] = useState([])
+  const [stockSearchLoading, setStockSearchLoading] = useState(false)
+  const [detailPage, setDetailPage] = useState(1)
+  const [historyPage, setHistoryPage] = useState(1)
+  const [stockPreviewPrice, setStockPreviewPrice] = useState(null)
+  const [stockPreviewLoading, setStockPreviewLoading] = useState(false)
 
   const trackedStocks = useMemo(
-    () => [...new Set(trades.map((trade) => String(trade.stock || '').toUpperCase()).filter(Boolean))],
+    () => [...new Set(trades.map((trade) => toTsxSymbol(trade.stock)).filter(Boolean))],
     [trades],
   )
+  const stockSuggestions = useMemo(() => {
+    const query = form.stock.trim().toUpperCase()
+    const localMatches = trackedStocks
+      .filter((stock) => getDisplayTicker(stock).includes(query))
+      .map((stock) => ({
+        symbol: stock,
+        displaySymbol: getDisplayTicker(stock),
+        description: `${getDisplayTicker(stock)} saved in your portfolio`,
+        exchange: 'TSX',
+        currency: 'CAD',
+        isSaved: true,
+      }))
+
+    const merged = [...localMatches]
+    for (const result of apiStockSuggestions) {
+      if (!merged.some((item) => item.symbol === result.symbol)) {
+        merged.push({ ...result, isSaved: trackedStocks.includes(result.symbol) })
+      }
+    }
+
+    return merged.slice(0, 8)
+  }, [apiStockSuggestions, form.stock, trackedStocks])
 
   const portfolio = useMemo(() => buildPortfolioModel(trades, pricesByStock), [trades, pricesByStock])
+  const historyEntries = useMemo(() => {
+    return [...trades].sort((a, b) => {
+      const dateCompare = new Date(b.date) - new Date(a.date)
+      if (dateCompare !== 0) return dateCompare
+      return String(b.id).localeCompare(String(a.id))
+    })
+  }, [trades])
+  const totalHistoryPages = Math.max(1, Math.ceil(historyEntries.length / HISTORY_ENTRIES_PER_PAGE))
+  const safeHistoryPage = Math.min(historyPage, totalHistoryPages)
+  const paginatedHistoryEntries = historyEntries.slice(
+    (safeHistoryPage - 1) * HISTORY_ENTRIES_PER_PAGE,
+    safeHistoryPage * HISTORY_ENTRIES_PER_PAGE,
+  )
+  const visibleHistoryPages = getVisiblePageNumbers(safeHistoryPage, totalHistoryPages)
   const effectiveSelectedStock = portfolio.stocks.some((stock) => stock.stock === selectedStock) ? selectedStock : null
   const selectedStockData = portfolio.stocks.find((stock) => stock.stock === effectiveSelectedStock) || null
+  const detailEntries = useMemo(() => {
+    if (!selectedStockData) return []
+
+    return [...selectedStockData.entries].sort((a, b) => {
+      const dateCompare = new Date(b.date) - new Date(a.date)
+      if (dateCompare !== 0) return dateCompare
+      return String(b.id).localeCompare(String(a.id))
+    })
+  }, [selectedStockData])
+  const totalDetailPages = Math.max(1, Math.ceil(detailEntries.length / ENTRIES_PER_PAGE))
+  const safeDetailPage = Math.min(detailPage, totalDetailPages)
+  const paginatedDetailEntries = detailEntries.slice((safeDetailPage - 1) * ENTRIES_PER_PAGE, safeDetailPage * ENTRIES_PER_PAGE)
   const bestPerformer = portfolio.stocks.reduce((best, stock) => {
     if (!best || stock.totalPnl > best.totalPnl) return stock
     return best
@@ -452,6 +518,7 @@ function App() {
         if (loadError) throw loadError
         if (!cancelled) {
           setTrades(Array.isArray(data) ? data : [])
+          setHistoryPage(1)
         }
       } catch (err) {
         console.error('Supabase trades load failed:', err)
@@ -503,6 +570,86 @@ function App() {
     }
   }, [trackedStocks])
 
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadStockSuggestions() {
+      if (!isTradeModalOpen || !showStockSuggestions) {
+        if (!cancelled) {
+          setApiStockSuggestions([])
+          setStockSearchLoading(false)
+        }
+        return
+      }
+
+      const query = form.stock.trim()
+      if (!query) {
+        if (!cancelled) {
+          setApiStockSuggestions([])
+          setStockSearchLoading(false)
+        }
+        return
+      }
+
+      try {
+        setStockSearchLoading(true)
+        const results = await searchCanadianStocks(query)
+        if (!cancelled) {
+          setApiStockSuggestions(results)
+        }
+      } catch (error) {
+        console.error('TSX stock search failed:', error)
+      } finally {
+        if (!cancelled) {
+          setStockSearchLoading(false)
+        }
+      }
+    }
+
+    void loadStockSuggestions()
+
+    return () => {
+      cancelled = true
+    }
+  }, [form.stock, isTradeModalOpen, showStockSuggestions])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadPreviewPrice() {
+      if (!isTradeModalOpen || !form.stock.trim()) {
+        if (!cancelled) {
+          setStockPreviewPrice(null)
+          setStockPreviewLoading(false)
+        }
+        return
+      }
+
+      try {
+        setStockPreviewLoading(true)
+        const quote = await fetchStockPrice(form.stock.trim())
+        if (!cancelled) {
+          setStockPreviewPrice(Number(quote.current) > 0 ? quote.current : null)
+        }
+      } catch (error) {
+        console.error('Preview price lookup failed:', error)
+        if (!cancelled) {
+          setStockPreviewPrice(null)
+        }
+      } finally {
+        if (!cancelled) {
+          setStockPreviewLoading(false)
+        }
+      }
+    }
+
+    void loadPreviewPrice()
+
+    return () => {
+      cancelled = true
+    }
+  }, [form.stock, isTradeModalOpen])
+
   const onAuthChange = (event) => {
     const { name, value } = event.target
     setAuthForm((prev) => ({ ...prev, [name]: value }))
@@ -511,12 +658,15 @@ function App() {
   const onTradeChange = (event) => {
     const { name, value } = event.target
     setForm((prev) => ({ ...prev, [name]: value }))
+    if (name === 'stock') {
+      setShowStockSuggestions(true)
+    }
   }
 
   const resetTradeForm = (preferredStock = '') => {
     setForm({
       ...defaultTradeForm,
-      stock: preferredStock,
+      stock: getDisplayTicker(preferredStock),
     })
     setEditingId(null)
   }
@@ -524,12 +674,23 @@ function App() {
   const openTradeModal = (preferredStock = '') => {
     resetTradeForm(preferredStock)
     setError('')
+    setShowStockSuggestions(false)
+    setApiStockSuggestions([])
+    setStockPreviewPrice(null)
     setIsTradeModalOpen(true)
   }
 
   const closeTradeModal = () => {
     setIsTradeModalOpen(false)
+    setShowStockSuggestions(false)
+    setApiStockSuggestions([])
+    setStockPreviewPrice(null)
     resetTradeForm(selectedStock || '')
+  }
+
+  const selectStockSuggestion = (stock) => {
+    setForm((prev) => ({ ...prev, stock: stock.displaySymbol }))
+    setShowStockSuggestions(false)
   }
 
   const submitAuth = async (event) => {
@@ -617,14 +778,15 @@ function App() {
       return
     }
 
-    const stock = form.stock.toUpperCase().trim()
+    const stock = toTsxSymbol(form.stock)
+    const displayStock = getDisplayTicker(stock)
     const qty = toNumber(form.qty)
     const price = toNumber(form.price)
 
     if (form.type === 'sell') {
       const availableQty = getAvailableQuantityForSell(stock, editingId)
       if (qty > availableQty) {
-        setError(`You only have ${formatQuantity(availableQty)} shares available to sell for ${stock}.`)
+        setError(`You only have ${formatQuantity(availableQty)} shares available to sell for ${displayStock}.`)
         return
       }
     }
@@ -660,12 +822,13 @@ function App() {
           .select()
           .single()
 
-        if (insertError) throw insertError
+      if (insertError) throw insertError
 
         setTrades((prev) => [data, ...prev])
       }
 
       setSelectedStock(stock)
+      setDetailPage(1)
       closeTradeModal()
     } catch (err) {
       console.error('Supabase save trade failed:', err)
@@ -678,7 +841,7 @@ function App() {
   const onEdit = (trade) => {
     setEditingId(trade.id)
     setForm({
-      stock: trade.stock,
+      stock: getDisplayTicker(trade.stock),
       qty: String(trade.qty),
       price: String(trade.price),
       type: trade.type,
@@ -782,7 +945,7 @@ function App() {
         <article className="summary-segment">
           <p>Current Value</p>
           <h2>{formatCurrency(portfolio.totals.currentValue)}</h2>
-          <span>{formatQuantity(portfolio.totals.totalShares)} shares</span>
+          <span>{priceLoading ? 'Refreshing live prices...' : `${formatQuantity(portfolio.totals.totalShares)} shares`}</span>
         </article>
         <article className="summary-segment">
           <p>Total P&amp;L</p>
@@ -796,7 +959,7 @@ function App() {
       </section>
 
       <section className="tab-row">
-        {['portfolio', 'analytics', 'alerts'].map((tab) => (
+        {['portfolio', 'analytics', 'alerts', 'history'].map((tab) => (
           <button
             key={tab}
             type="button"
@@ -828,17 +991,22 @@ function App() {
               </article>
             ) : (
               portfolio.stocks.map((stock) => (
-                <article key={stock.stock} className="stock-row card" onClick={() => setSelectedStock(stock.stock)} role="button" tabIndex={0} onKeyDown={(event) => {
+                <article key={stock.stock} className="stock-row card" onClick={() => {
+                  setSelectedStock(stock.stock)
+                  setDetailPage(1)
+                }} role="button" tabIndex={0} onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault()
                     setSelectedStock(stock.stock)
+                    setDetailPage(1)
                   }
                 }}>
                   <div className="stock-row-ident">
                     <span className="stock-avatar">{getStockInitials(stock.stock)}</span>
                     <div>
-                      <h4>{stock.stock}</h4>
+                      <h4>{stock.displayStock}</h4>
                       <p>{stock.entryCount} entries - WAP {formatCurrency(stock.avgBuyPrice)}</p>
+                      {!stock.hasLivePrice ? <small className="warning-note">Live price unavailable, using last recorded price.</small> : null}
                     </div>
                   </div>
                   <div className="stock-metric">
@@ -868,47 +1036,6 @@ function App() {
             )}
           </section>
 
-          <section className="card panel ledger-panel">
-            <div className="panel-head">
-              <h3>Recent Transaction Log</h3>
-              <small>{trades.length} total entries</small>
-            </div>
-            {!user ? (
-              <p className="empty">Sign in to view your transaction log.</p>
-            ) : trades.length === 0 ? (
-              <p className="empty">No entries yet.</p>
-            ) : (
-              <div className="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Date</th>
-                      <th>Stock</th>
-                      <th>Type</th>
-                      <th>Qty</th>
-                      <th>Price</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {trades.slice(0, 8).map((trade) => (
-                      <tr key={trade.id}>
-                        <td>{formatDate(trade.date)}</td>
-                        <td>{trade.stock}</td>
-                        <td><span className={`status-badge ${trade.type === 'buy' ? 'status-active' : 'status-sold'}`}>{trade.type}</span></td>
-                        <td>{formatQuantity(toNumber(trade.qty))}</td>
-                        <td>{formatCurrency(toNumber(trade.price))}</td>
-                        <td className="actions">
-                          <button type="button" className="ghost-btn" onClick={() => onEdit(trade)}>Edit</button>
-                          <button type="button" className="danger-btn" onClick={() => onDelete(trade.id)}>Delete</button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
         </>
       ) : null}
 
@@ -971,23 +1098,111 @@ function App() {
           </p>
         </section>
       ) : null}
+
+      {activeTab === 'history' ? (
+        <section className="card panel ledger-panel">
+          <div className="panel-head">
+            <h3>Recent Transaction Log</h3>
+            <small>{trades.length} total entries</small>
+          </div>
+          {!user ? (
+            <p className="empty">Sign in to view your transaction log.</p>
+          ) : trades.length === 0 ? (
+            <p className="empty">No entries yet.</p>
+          ) : (
+            <>
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Stock</th>
+                      <th>Type</th>
+                      <th>Qty</th>
+                      <th>Price</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paginatedHistoryEntries.map((trade) => (
+                      <tr key={trade.id}>
+                        <td>{formatDate(trade.date)}</td>
+                        <td>{getDisplayTicker(trade.stock)}</td>
+                        <td>
+                          <span className={`status-badge ${trade.type === 'buy' ? 'status-active' : 'status-sold'}`}>
+                            {trade.type}
+                          </span>
+                        </td>
+                        <td>{formatQuantity(toNumber(trade.qty))}</td>
+                        <td>{formatCurrency(toNumber(trade.price))}</td>
+                        <td className="actions">
+                          <button type="button" className="ghost-btn" onClick={() => onEdit(trade)}>Edit</button>
+                          <button type="button" className="danger-btn" onClick={() => onDelete(trade.id)}>Delete</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {historyEntries.length > HISTORY_ENTRIES_PER_PAGE ? (
+                <div className="pagination-row">
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    onClick={() => setHistoryPage((page) => Math.max(1, page - 1))}
+                    disabled={safeHistoryPage === 1}
+                  >
+                    Prev
+                  </button>
+                  <div className="page-number-row">
+                    {visibleHistoryPages.map((pageNumber) => (
+                      <button
+                        key={pageNumber}
+                        type="button"
+                        className={`page-number-btn ${pageNumber === safeHistoryPage ? 'page-number-btn-active' : ''}`}
+                        onClick={() => setHistoryPage(pageNumber)}
+                      >
+                        {pageNumber}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    onClick={() => setHistoryPage((page) => Math.min(totalHistoryPages, page + 1))}
+                    disabled={safeHistoryPage === totalHistoryPages}
+                  >
+                    Next
+                  </button>
+                </div>
+              ) : null}
+            </>
+          )}
+        </section>
+      ) : null}
     </>
   )
 
   const renderDetail = () => (
     <>
       <section className="breadcrumb-row">
-        <button type="button" className="breadcrumb-link" onClick={() => setSelectedStock(null)}>Dashboard</button>
+        <button type="button" className="breadcrumb-link" onClick={() => {
+          setSelectedStock(null)
+          setDetailPage(1)
+        }}>Dashboard</button>
         <span className="breadcrumb-sep">&gt;</span>
-        <span>{selectedStockData.stock}</span>
-        <button type="button" className="ghost-btn" onClick={() => setSelectedStock(null)}>Back</button>
+        <span>{selectedStockData.displayStock}</span>
+        <button type="button" className="ghost-btn" onClick={() => {
+          setSelectedStock(null)
+          setDetailPage(1)
+        }}>Back</button>
       </section>
 
       <section className="detail-hero">
         <div className="detail-title">
           <span className="stock-avatar stock-avatar-large">{getStockInitials(selectedStockData.stock)}</span>
           <div>
-            <h2>{selectedStockData.stock}</h2>
+            <h2>{selectedStockData.displayStock}</h2>
             <p>{formatQuantity(selectedStockData.sharesHeld)} shares held - {selectedStockData.entryCount} entries</p>
           </div>
         </div>
@@ -1008,6 +1223,7 @@ function App() {
         <article className="card panel">
           <p>Current Price</p>
           <h3>{formatCurrency(selectedStockData.currentPrice)}</h3>
+          {!selectedStockData.hasLivePrice ? <small className="warning-note">Live feed unavailable for this symbol.</small> : null}
         </article>
         <article className="card panel">
           <p>Unrealized P&amp;L</p>
@@ -1020,7 +1236,7 @@ function App() {
       <section className="card panel">
         <div className="panel-head">
           <h3>Price history</h3>
-          <small>Entry prices and live market snapshot</small>
+          <small>{selectedStockData.hasLivePrice ? 'Entry prices and live market snapshot' : 'Entry prices with fallback current value'}</small>
         </div>
         <LineChart stockData={selectedStockData} />
       </section>
@@ -1028,7 +1244,7 @@ function App() {
       <section className="card panel">
         <div className="panel-head">
           <h3>Transaction log</h3>
-          <small>{selectedStockData.entryCount} entries for {selectedStockData.stock}</small>
+          <small>{selectedStockData.entryCount} entries for {selectedStockData.displayStock}</small>
         </div>
         <div className="table-scroll">
           <table>
@@ -1046,7 +1262,7 @@ function App() {
               </tr>
             </thead>
             <tbody>
-              {selectedStockData.entries.map((entry) => (
+              {paginatedDetailEntries.map((entry) => (
                 <tr key={entry.id}>
                   <td>{formatDate(entry.date)}</td>
                   <td>
@@ -1076,6 +1292,17 @@ function App() {
             </tbody>
           </table>
         </div>
+        {detailEntries.length > ENTRIES_PER_PAGE ? (
+          <div className="pagination-row">
+            <button type="button" className="ghost-btn" onClick={() => setDetailPage((page) => Math.max(1, page - 1))} disabled={safeDetailPage === 1}>
+              Previous
+            </button>
+            <span className="pagination-copy">Page {safeDetailPage} of {totalDetailPages}</span>
+            <button type="button" className="ghost-btn" onClick={() => setDetailPage((page) => Math.min(totalDetailPages, page + 1))} disabled={safeDetailPage === totalDetailPages}>
+              Next
+            </button>
+          </div>
+        ) : null}
       </section>
     </>
   )
@@ -1118,7 +1345,56 @@ function App() {
             <form className="trade-form modal-form" onSubmit={saveTrade}>
               <label>
                 Stock Name
-                <input name="stock" type="text" placeholder="VEDL" value={form.stock} onChange={onTradeChange} disabled={saving} />
+                <div className="stock-input-wrap">
+                  <input
+                    name="stock"
+                    type="text"
+                    placeholder="Search TSX stock, e.g. MDA"
+                    value={form.stock}
+                    onChange={onTradeChange}
+                    onFocus={() => setShowStockSuggestions(true)}
+                    onBlur={() => {
+                      setTimeout(() => {
+                        setShowStockSuggestions(false)
+                      }, 120)
+                    }}
+                    autoComplete="off"
+                    disabled={saving}
+                  />
+                  {showStockSuggestions && stockSuggestions.length > 0 ? (
+                    <div className="stock-suggestion-list">
+                      {stockSuggestions.map((stock) => (
+                        <button
+                          key={stock.symbol}
+                          type="button"
+                          className="stock-suggestion-item"
+                          onMouseDown={() => selectStockSuggestion(stock)}
+                        >
+                          <div className="stock-suggestion-copy">
+                            <span>{stock.displaySymbol}</span>
+                            <small>{stock.description}</small>
+                          </div>
+                          <small>{stock.isSaved ? 'Saved' : `${stock.exchange} · ${stock.currency}`}</small>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  {showStockSuggestions && stockSearchLoading ? (
+                    <div className="stock-suggestion-state">Searching TSX symbols...</div>
+                  ) : null}
+                  {showStockSuggestions && !stockSearchLoading && form.stock.trim() && stockSuggestions.length === 0 ? (
+                    <div className="stock-suggestion-state">No TSX symbol found. Try another Canadian ticker.</div>
+                  ) : null}
+                </div>
+                {form.stock.trim() ? (
+                  <small className="field-helper">
+                    {stockPreviewLoading
+                      ? 'Fetching live TSX price...'
+                      : stockPreviewPrice !== null
+                        ? `Live price preview: ${formatCurrency(stockPreviewPrice)}`
+                        : 'No live quote found yet for this TSX symbol.'}
+                  </small>
+                ) : null}
               </label>
               <label>
                 Quantity

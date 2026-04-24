@@ -33,6 +33,7 @@ cp .env.example .env
 - `VITE_SUPABASE_URL`
 - `VITE_SUPABASE_ANON_KEY`
 - `VITE_FINNHUB_API_KEY`
+- `VITE_TWELVEDATA_API_KEY` for better TSX live price coverage
 
 3. Run locally:
 

@@ -42,7 +42,8 @@ label,
 .stock-row p,
 .stock-metric span,
 .summary-segment span,
-.analytics-card small {
+.analytics-card small,
+.warning-note {
   color: var(--text2);
 }
 
@@ -290,6 +291,41 @@ th {
   margin-top: 4px;
 }
 
+.pagination-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.pagination-copy {
+  color: var(--text2);
+  font-size: 13px;
+}
+
+.page-number-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.page-number-btn {
+  min-width: 38px;
+  border: 1px solid var(--border2);
+  border-radius: var(--r2);
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--text2);
+  font-weight: 600;
+}
+
+.page-number-btn-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 .table-scroll {
   width: 100%;
   overflow-x: auto;
@@ -327,6 +363,72 @@ td {
 
 .modal-actions {
   grid-column: 1 / -1;
+}
+
+.stock-input-wrap {
+  position: relative;
+}
+
+.stock-suggestion-list {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 15;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  background: #141420;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+}
+
+.stock-suggestion-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.stock-suggestion-item:hover {
+  background: var(--bg3);
+  border-color: var(--border2);
+}
+
+.stock-suggestion-item small {
+  color: var(--text2);
+}
+
+.stock-suggestion-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.stock-suggestion-state {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 15;
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  background: #141420;
+  color: var(--text2);
+  padding: 12px;
+}
+
+.field-helper {
+  display: block;
+  margin-top: 8px;
+  color: var(--text2);
 }
 
 label {
@@ -535,6 +637,12 @@ select {
   display: block;
   margin-top: 4px;
   color: var(--text2);
+}
+
+.warning-note {
+  display: block;
+  margin-top: 6px;
+  color: var(--amber);
 }
 
 .modal-backdrop {
