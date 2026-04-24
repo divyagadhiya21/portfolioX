@@ -195,6 +195,7 @@ function App() {
     }
   }
 
+function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
