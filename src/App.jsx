@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 import { supabase } from './services/supabase'
+import { fetchMultiplePrices } from './services/finnhub'
 
 const MAX_DECIMAL_VALUE = 99999999
 
@@ -17,47 +18,47 @@ const defaultAuthForm = {
   password: '',
 }
 
-const toNumber = (value) => Number.parseFloat(value || 0)
+const currencyFormatter = new Intl.NumberFormat('en-IN', {
+  style: 'currency',
+  currency: 'INR',
+  maximumFractionDigits: 2,
+})
 
-function aggregateHoldings(trades) {
-  const map = {}
+const percentFormatter = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
 
-  for (const trade of trades) {
-    const key = String(trade.stock || '').toUpperCase()
-    if (!key) continue
+const dateFormatter = new Intl.DateTimeFormat('en-GB', {
+  day: '2-digit',
+  month: 'short',
+  year: '2-digit',
+})
 
-    if (!map[key]) {
-      map[key] = {
-        stock: key,
-        boughtQty: 0,
-        soldQty: 0,
-        invested: 0,
-      }
-    }
+const numberFormatter = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 4,
+})
 
-    const qty = toNumber(trade.qty)
-    const price = toNumber(trade.price)
+function toNumber(value) {
+  return Number.parseFloat(value || 0)
+}
 
-    if (trade.type === 'sell') {
-      map[key].soldQty += qty
-    } else {
-      map[key].boughtQty += qty
-      map[key].invested += qty * price
-    }
-  }
+function formatCurrency(value) {
+  return currencyFormatter.format(Number.isFinite(value) ? value : 0)
+}
 
-  return Object.values(map)
-    .map((holding) => {
-      const heldQty = Math.max(0, holding.boughtQty - holding.soldQty)
-      const avg = holding.boughtQty > 0 ? holding.invested / holding.boughtQty : 0
+function formatPercent(value) {
+  return `${value >= 0 ? '+' : ''}${percentFormatter.format(Number.isFinite(value) ? value : 0)}%`
+}
 
-      return {
-        stock: holding.stock,
-        heldQty,
-        avg,
-      }
-    })
-    .filter((holding) => holding.heldQty > 0)
+function formatQuantity(value) {
+  return numberFormatter.format(Number.isFinite(value) ? value : 0)
+}
+
+function formatDate(value) {
+  if (!value) return '--'
+  return dateFormatter.format(new Date(value))
 }
 
 function getFriendlyErrorMessage(error) {
@@ -89,8 +90,271 @@ function isValidDecimalInput(value) {
   return numericValue >= 0 && numericValue <= MAX_DECIMAL_VALUE
 }
 
+function getStockInitials(stock) {
+  return String(stock || '').slice(0, 2).toUpperCase() || '--'
+}
+
+function buildChartPoints(stockData) {
+  if (!stockData) return []
+
+  const timeline = stockData.entries.map((entry, index) => ({
+    label: entry.type === 'sell' ? `Sell ${index + 1}` : `Buy ${index + 1}`,
+    value: entry.price,
+  }))
+
+  timeline.push({
+    label: 'Now',
+    value: stockData.currentPrice,
+  })
+
+  return timeline
+}
+
+function buildPortfolioModel(trades, pricesByStock) {
+  const groupedTrades = trades.reduce((acc, trade) => {
+    const stock = String(trade.stock || '').toUpperCase()
+    if (!stock) return acc
+    acc[stock] ||= []
+    acc[stock].push({
+      ...trade,
+      stock,
+      qty: toNumber(trade.qty),
+      price: toNumber(trade.price),
+    })
+    return acc
+  }, {})
+
+  const stocks = Object.entries(groupedTrades).map(([stock, entries]) => {
+    const sortedEntries = [...entries].sort((a, b) => {
+      if (a.date === b.date) return String(a.id).localeCompare(String(b.id))
+      return new Date(a.date) - new Date(b.date)
+    })
+
+    const market = pricesByStock[stock] || {}
+    const fallbackPrice = sortedEntries.at(-1)?.price || 0
+    const currentPrice = market.current || fallbackPrice
+    const previousClose = market.previousClose || currentPrice
+
+    const openLots = []
+    const buyEntryMap = new Map()
+    const tradeRows = []
+
+    let realizedPnl = 0
+    let soldQuantity = 0
+    let boughtQuantity = 0
+
+    for (const trade of sortedEntries) {
+      if (trade.type === 'buy') {
+        boughtQuantity += trade.qty
+
+        const row = {
+          ...trade,
+          remainingQty: trade.qty,
+          soldQty: 0,
+          currentPrice,
+          currentValue: 0,
+          investedValue: 0,
+          pnl: 0,
+          pnlPercent: 0,
+          costBasis: trade.qty * trade.price,
+          status: 'active',
+        }
+
+        tradeRows.push(row)
+        buyEntryMap.set(trade.id, row)
+        openLots.push({
+          tradeId: trade.id,
+          remainingQty: trade.qty,
+          buyPrice: trade.price,
+        })
+        continue
+      }
+
+      soldQuantity += trade.qty
+      let sellRemaining = trade.qty
+      let costBasis = 0
+
+      while (sellRemaining > 0 && openLots.length > 0) {
+        const lot = openLots[0]
+        const consumedQty = Math.min(lot.remainingQty, sellRemaining)
+        const buyRow = buyEntryMap.get(lot.tradeId)
+
+        costBasis += consumedQty * lot.buyPrice
+        lot.remainingQty -= consumedQty
+        sellRemaining -= consumedQty
+
+        if (buyRow) {
+          buyRow.remainingQty = Math.max(0, buyRow.remainingQty - consumedQty)
+          buyRow.soldQty += consumedQty
+        }
+
+        if (lot.remainingQty <= 0.0000001) {
+          openLots.shift()
+        }
+      }
+
+      const proceeds = trade.qty * trade.price
+      const pnl = proceeds - costBasis
+      realizedPnl += pnl
+
+      tradeRows.push({
+        ...trade,
+        remainingQty: 0,
+        soldQty: trade.qty,
+        currentPrice,
+        currentValue: proceeds,
+        investedValue: proceeds,
+        pnl,
+        pnlPercent: costBasis > 0 ? (pnl / costBasis) * 100 : 0,
+        costBasis,
+        status: 'sold',
+      })
+    }
+
+    for (const row of tradeRows) {
+      if (row.type !== 'buy') continue
+
+      row.currentPrice = currentPrice
+      row.investedValue = row.remainingQty * row.price
+      row.currentValue = row.remainingQty * currentPrice
+      row.pnl = row.currentValue - row.investedValue
+      row.pnlPercent = row.investedValue > 0 ? (row.pnl / row.investedValue) * 100 : 0
+      row.status = row.remainingQty > 0 ? 'active' : 'sold'
+    }
+
+    const sharesHeld = tradeRows
+      .filter((row) => row.type === 'buy')
+      .reduce((sum, row) => sum + row.remainingQty, 0)
+
+    const activeInvested = tradeRows
+      .filter((row) => row.type === 'buy')
+      .reduce((sum, row) => sum + row.investedValue, 0)
+
+    const currentValue = sharesHeld * currentPrice
+    const unrealizedPnl = currentValue - activeInvested
+    const totalPnl = unrealizedPnl + realizedPnl
+    const avgBuyPrice = sharesHeld > 0 ? activeInvested / sharesHeld : 0
+    const dailyPnl = sharesHeld * (currentPrice - previousClose)
+    const dailyPnlPercent = previousClose > 0 ? ((currentPrice - previousClose) / previousClose) * 100 : 0
+    const activeEntries = tradeRows.filter((row) => row.status === 'active')
+    const closedEntries = tradeRows.filter((row) => row.type === 'sell')
+    const profitableClosedTrades = closedEntries.filter((row) => row.pnl > 0).length
+    const winRate = closedEntries.length > 0 ? (profitableClosedTrades / closedEntries.length) * 100 : 0
+
+    return {
+      stock,
+      currentPrice,
+      previousClose,
+      entryCount: tradeRows.length,
+      activeEntries: activeEntries.length,
+      sharesHeld,
+      activeInvested,
+      currentValue,
+      avgBuyPrice,
+      realizedPnl,
+      unrealizedPnl,
+      totalPnl,
+      totalBoughtQty: boughtQuantity,
+      totalSoldQty: soldQuantity,
+      dailyPnl,
+      dailyPnlPercent,
+      winRate,
+      entries: tradeRows,
+      chartPoints: buildChartPoints({
+        entries: tradeRows,
+        currentPrice,
+      }),
+    }
+  })
+
+  const sortedStocks = stocks.sort((a, b) => b.currentValue - a.currentValue)
+  const totalInvested = sortedStocks.reduce((sum, stock) => sum + stock.activeInvested, 0)
+  const currentValue = sortedStocks.reduce((sum, stock) => sum + stock.currentValue, 0)
+  const realizedPnl = sortedStocks.reduce((sum, stock) => sum + stock.realizedPnl, 0)
+  const unrealizedPnl = sortedStocks.reduce((sum, stock) => sum + stock.unrealizedPnl, 0)
+  const totalPnl = realizedPnl + unrealizedPnl
+  const dailyPnl = sortedStocks.reduce((sum, stock) => sum + stock.dailyPnl, 0)
+  const totalShares = sortedStocks.reduce((sum, stock) => sum + stock.sharesHeld, 0)
+
+  const enrichedStocks = sortedStocks.map((stock) => ({
+    ...stock,
+    allocationPercent: currentValue > 0 ? (stock.currentValue / currentValue) * 100 : 0,
+  }))
+
+  return {
+    stocks: enrichedStocks,
+    totals: {
+      invested: totalInvested,
+      currentValue,
+      realizedPnl,
+      unrealizedPnl,
+      totalPnl,
+      totalPnlPercent: totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0,
+      dailyPnl,
+      totalShares,
+      positions: enrichedStocks.length,
+    },
+  }
+}
+
+function LineChart({ stockData }) {
+  if (!stockData || stockData.chartPoints.length < 2) {
+    return <p className="empty">Add more entries to unlock the stock detail chart.</p>
+  }
+
+  const width = 760
+  const height = 220
+  const padding = 24
+  const points = stockData.chartPoints
+  const values = points.map((point) => point.value)
+  const min = Math.min(...values, stockData.avgBuyPrice || values[0])
+  const max = Math.max(...values, stockData.avgBuyPrice || values[0])
+  const valueRange = Math.max(max - min, 1)
+
+  const coordinates = points.map((point, index) => {
+    const x = padding + (index * (width - padding * 2)) / Math.max(points.length - 1, 1)
+    const y = height - padding - ((point.value - min) / valueRange) * (height - padding * 2)
+    return { ...point, x, y }
+  })
+
+  const path = coordinates.map((point) => `${point.x},${point.y}`).join(' ')
+  const avgLineY = height - padding - ((stockData.avgBuyPrice - min) / valueRange) * (height - padding * 2)
+
+  return (
+    <div className="chart-wrap">
+      <svg viewBox={`0 0 ${width} ${height}`} className="line-chart" role="img" aria-label={`${stockData.stock} price timeline`}>
+        <defs>
+          <linearGradient id="priceArea" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="rgba(124, 92, 255, 0.35)" />
+            <stop offset="100%" stopColor="rgba(124, 92, 255, 0)" />
+          </linearGradient>
+        </defs>
+        {[0, 0.25, 0.5, 0.75, 1].map((step) => {
+          const y = padding + (height - padding * 2) * step
+          return <line key={step} x1={padding} x2={width - padding} y1={y} y2={y} className="chart-grid-line" />
+        })}
+        <line x1={padding} x2={width - padding} y1={avgLineY} y2={avgLineY} className="chart-reference-line" />
+        <polygon
+          points={`${coordinates[0].x},${height - padding} ${path} ${coordinates.at(-1).x},${height - padding}`}
+          className="chart-area"
+        />
+        <polyline points={path} className="chart-path" />
+        {coordinates.map((point) => (
+          <g key={point.label}>
+            <circle cx={point.x} cy={point.y} r="4.5" className="chart-dot" />
+          </g>
+        ))}
+      </svg>
+      <div className="chart-axis">
+        {points.map((point) => (
+          <span key={point.label}>{point.label}</span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function App() {
-  const [session, setSession] = useState(null)
   const [user, setUser] = useState(null)
   const [authMode, setAuthMode] = useState('signIn')
   const [authForm, setAuthForm] = useState(defaultAuthForm)
@@ -105,22 +369,28 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [selectedStock, setSelectedStock] = useState(null)
+  const [activeTab, setActiveTab] = useState('portfolio')
+  const [isTradeModalOpen, setIsTradeModalOpen] = useState(false)
+  const [pricesByStock, setPricesByStock] = useState({})
+  const [priceLoading, setPriceLoading] = useState(false)
 
-  const holdings = useMemo(() => aggregateHoldings(trades), [trades])
+  const trackedStocks = useMemo(
+    () => [...new Set(trades.map((trade) => String(trade.stock || '').toUpperCase()).filter(Boolean))],
+    [trades],
+  )
 
-  const stats = useMemo(() => {
-    const invested = trades
-      .filter((trade) => trade.type !== 'sell')
-      .reduce((sum, trade) => sum + toNumber(trade.qty) * toNumber(trade.price), 0)
-
-    const estimatedValue = holdings.reduce((sum, holding) => sum + holding.heldQty * holding.avg, 0)
-
-    return {
-      invested,
-      estimatedValue,
-      positions: holdings.length,
-    }
-  }, [holdings, trades])
+  const portfolio = useMemo(() => buildPortfolioModel(trades, pricesByStock), [trades, pricesByStock])
+  const effectiveSelectedStock = portfolio.stocks.some((stock) => stock.stock === selectedStock) ? selectedStock : null
+  const selectedStockData = portfolio.stocks.find((stock) => stock.stock === effectiveSelectedStock) || null
+  const bestPerformer = portfolio.stocks.reduce((best, stock) => {
+    if (!best || stock.totalPnl > best.totalPnl) return stock
+    return best
+  }, null)
+  const worstPerformer = portfolio.stocks.reduce((worst, stock) => {
+    if (!worst || stock.totalPnl < worst.totalPnl) return stock
+    return worst
+  }, null)
 
   useEffect(() => {
     let active = true
@@ -132,9 +402,7 @@ function App() {
 
         if (!active) return
 
-        const nextSession = data.session
-        setSession(nextSession)
-        setUser(nextSession?.user ?? null)
+        setUser(data.session?.user ?? null)
       } catch (err) {
         console.error('Supabase session restore failed:', err)
         if (active) {
@@ -150,7 +418,6 @@ function App() {
     void restoreSession()
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession)
       setUser(nextSession?.user ?? null)
       setAuthLoading(false)
       setError('')
@@ -205,6 +472,37 @@ function App() {
     }
   }, [user])
 
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadPrices() {
+      if (!trackedStocks.length) {
+        setPricesByStock({})
+        return
+      }
+
+      try {
+        setPriceLoading(true)
+        const nextPrices = await fetchMultiplePrices(trackedStocks)
+        if (!cancelled) {
+          setPricesByStock(nextPrices)
+        }
+      } catch (err) {
+        console.error('Price fetch failed:', err)
+      } finally {
+        if (!cancelled) {
+          setPriceLoading(false)
+        }
+      }
+    }
+
+    void loadPrices()
+
+    return () => {
+      cancelled = true
+    }
+  }, [trackedStocks])
+
   const onAuthChange = (event) => {
     const { name, value } = event.target
     setAuthForm((prev) => ({ ...prev, [name]: value }))
@@ -215,9 +513,23 @@ function App() {
     setForm((prev) => ({ ...prev, [name]: value }))
   }
 
-  const resetTradeForm = () => {
-    setForm(defaultTradeForm)
+  const resetTradeForm = (preferredStock = '') => {
+    setForm({
+      ...defaultTradeForm,
+      stock: preferredStock,
+    })
     setEditingId(null)
+  }
+
+  const openTradeModal = (preferredStock = '') => {
+    resetTradeForm(preferredStock)
+    setError('')
+    setIsTradeModalOpen(true)
+  }
+
+  const closeTradeModal = () => {
+    setIsTradeModalOpen(false)
+    resetTradeForm(selectedStock || '')
   }
 
   const submitAuth = async (event) => {
@@ -270,11 +582,21 @@ function App() {
       setError('')
       const { error: signOutError } = await supabase.auth.signOut()
       if (signOutError) throw signOutError
-      resetTradeForm()
+      setSelectedStock(null)
+      closeTradeModal()
     } catch (err) {
       console.error('Supabase sign out failed:', err)
       setAuthError(getFriendlyErrorMessage(err))
     }
+  }
+
+  function getAvailableQuantityForSell(stock, excludeTradeId = null) {
+    const stockModel = buildPortfolioModel(
+      trades.filter((trade) => trade.id !== excludeTradeId),
+      pricesByStock,
+    ).stocks.find((item) => item.stock === stock)
+
+    return stockModel?.sharesHeld || 0
   }
 
   const saveTrade = async (event) => {
@@ -295,10 +617,22 @@ function App() {
       return
     }
 
+    const stock = form.stock.toUpperCase().trim()
+    const qty = toNumber(form.qty)
+    const price = toNumber(form.price)
+
+    if (form.type === 'sell') {
+      const availableQty = getAvailableQuantityForSell(stock, editingId)
+      if (qty > availableQty) {
+        setError(`You only have ${formatQuantity(availableQty)} shares available to sell for ${stock}.`)
+        return
+      }
+    }
+
     const payload = {
-      stock: form.stock.toUpperCase().trim(),
-      qty: toNumber(form.qty),
-      price: toNumber(form.price),
+      stock,
+      qty,
+      price,
       type: form.type,
       date: form.date,
     }
@@ -331,7 +665,8 @@ function App() {
         setTrades((prev) => [data, ...prev])
       }
 
-      resetTradeForm()
+      setSelectedStock(stock)
+      closeTradeModal()
     } catch (err) {
       console.error('Supabase save trade failed:', err)
       setError(getFriendlyErrorMessage(err))
@@ -349,6 +684,8 @@ function App() {
       type: trade.type,
       date: trade.date,
     })
+    setError('')
+    setIsTradeModalOpen(true)
   }
 
   const onDelete = async (id) => {
@@ -366,21 +703,389 @@ function App() {
       if (deleteError) throw deleteError
 
       setTrades((prev) => prev.filter((trade) => trade.id !== id))
-      if (editingId === id) resetTradeForm()
+      if (editingId === id) {
+        closeTradeModal()
+      }
     } catch (err) {
       console.error('Supabase delete trade failed:', err)
       setError(getFriendlyErrorMessage(err))
     }
   }
 
-  const tradeFormDisabled = !user || saving
+  const renderAuthPanel = () => (
+    <section className="card panel auth-panel">
+      <div className="panel-head">
+        <div>
+          <h3>{user ? 'Your session is ready' : authMode === 'signIn' ? 'Sign In' : 'Create Account'}</h3>
+          <small>
+            {user
+              ? 'Trades sync instantly to your Supabase account and stay isolated per user.'
+              : 'Use the Supabase user you created, or create a new account here.'}
+          </small>
+        </div>
+
+        {!user ? (
+          <button
+            type="button"
+            className="ghost-btn"
+            onClick={() => {
+              setAuthMode((prev) => (prev === 'signIn' ? 'signUp' : 'signIn'))
+              setAuthError('')
+              setAuthMessage('')
+            }}
+          >
+            {authMode === 'signIn' ? 'Need an account?' : 'Have an account?'}
+          </button>
+        ) : (
+          <button type="button" className="primary-btn" onClick={() => openTradeModal(selectedStock || '')}>
+            Add Entry
+          </button>
+        )}
+      </div>
+
+      {authLoading ? (
+        <p className="empty">Checking Supabase session...</p>
+      ) : user ? (
+        <div className="session-inline">
+          <span className="status-badge status-active">Live sync enabled</span>
+          <p className="empty">You can now create, edit, and delete only your own trades across devices.</p>
+        </div>
+      ) : (
+        <form className="trade-form auth-form-grid" onSubmit={submitAuth}>
+          <label>
+            Email
+            <input name="email" type="email" placeholder="divya1@test.email" value={authForm.email} onChange={onAuthChange} />
+          </label>
+          <label>
+            Password
+            <input name="password" type="password" placeholder="Enter password" value={authForm.password} onChange={onAuthChange} />
+          </label>
+          <button type="submit" className="primary-btn" disabled={authSubmitting}>
+            {authSubmitting ? 'Please wait...' : authMode === 'signIn' ? 'Sign In' : 'Create Account'}
+          </button>
+        </form>
+      )}
+
+      {authError ? <p className="error">{authError}</p> : null}
+      {authMessage ? <p className="success">{authMessage}</p> : null}
+    </section>
+  )
+
+  const renderDashboard = () => (
+    <>
+      <section className="hero-strip">
+        <article className="summary-segment">
+          <p>Total Invested</p>
+          <h2>{formatCurrency(portfolio.totals.invested)}</h2>
+          <span>{portfolio.totals.positions} stocks</span>
+        </article>
+        <article className="summary-segment">
+          <p>Current Value</p>
+          <h2>{formatCurrency(portfolio.totals.currentValue)}</h2>
+          <span>{formatQuantity(portfolio.totals.totalShares)} shares</span>
+        </article>
+        <article className="summary-segment">
+          <p>Total P&amp;L</p>
+          <h2 className={portfolio.totals.totalPnl >= 0 ? 'metric-positive' : 'metric-negative'}>
+            {formatCurrency(portfolio.totals.totalPnl)}
+          </h2>
+          <span className={`pill ${portfolio.totals.totalPnl >= 0 ? 'pill-positive' : 'pill-negative'}`}>
+            {formatPercent(portfolio.totals.totalPnlPercent)}
+          </span>
+        </article>
+      </section>
+
+      <section className="tab-row">
+        {['portfolio', 'analytics', 'alerts'].map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            className={`tab-btn ${activeTab === tab ? 'tab-btn-active' : ''}`}
+            onClick={() => setActiveTab(tab)}
+          >
+            {tab[0].toUpperCase() + tab.slice(1)}
+          </button>
+        ))}
+      </section>
+
+      {activeTab === 'portfolio' ? (
+        <>
+          <section className="section-head">
+            <div>
+              <h3>Holdings</h3>
+              <small>{priceLoading ? 'Refreshing market prices...' : loading ? 'Loading trades...' : `${portfolio.totals.positions} positions tracked`}</small>
+            </div>
+          </section>
+
+          <section className="holdings-list">
+            {!user ? (
+              <article className="card panel">
+                <p className="empty">Sign in to load your portfolio dashboard.</p>
+              </article>
+            ) : portfolio.stocks.length === 0 ? (
+              <article className="card panel">
+                <p className="empty">No holdings yet. Add your first entry to build the dashboard.</p>
+              </article>
+            ) : (
+              portfolio.stocks.map((stock) => (
+                <article key={stock.stock} className="stock-row card" onClick={() => setSelectedStock(stock.stock)} role="button" tabIndex={0} onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    setSelectedStock(stock.stock)
+                  }
+                }}>
+                  <div className="stock-row-ident">
+                    <span className="stock-avatar">{getStockInitials(stock.stock)}</span>
+                    <div>
+                      <h4>{stock.stock}</h4>
+                      <p>{stock.entryCount} entries - WAP {formatCurrency(stock.avgBuyPrice)}</p>
+                    </div>
+                  </div>
+                  <div className="stock-metric">
+                    <span>Qty Held</span>
+                    <strong>{formatQuantity(stock.sharesHeld)}</strong>
+                  </div>
+                  <div className="stock-metric">
+                    <span>Current Price</span>
+                    <strong>{formatCurrency(stock.currentPrice)}</strong>
+                  </div>
+                  <div className="stock-metric">
+                    <span>Invested</span>
+                    <strong>{formatCurrency(stock.activeInvested)}</strong>
+                  </div>
+                  <div className="stock-metric">
+                    <span>Unrealized P&amp;L</span>
+                    <strong className={stock.unrealizedPnl >= 0 ? 'metric-positive' : 'metric-negative'}>
+                      {formatCurrency(stock.unrealizedPnl)}
+                    </strong>
+                    <span className={`pill ${stock.unrealizedPnl >= 0 ? 'pill-positive' : 'pill-negative'}`}>
+                      {formatPercent(stock.activeInvested > 0 ? (stock.unrealizedPnl / stock.activeInvested) * 100 : 0)}
+                    </span>
+                  </div>
+                  <div className="stock-row-arrow">View</div>
+                </article>
+              ))
+            )}
+          </section>
+
+          <section className="card panel ledger-panel">
+            <div className="panel-head">
+              <h3>Recent Transaction Log</h3>
+              <small>{trades.length} total entries</small>
+            </div>
+            {!user ? (
+              <p className="empty">Sign in to view your transaction log.</p>
+            ) : trades.length === 0 ? (
+              <p className="empty">No entries yet.</p>
+            ) : (
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Stock</th>
+                      <th>Type</th>
+                      <th>Qty</th>
+                      <th>Price</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trades.slice(0, 8).map((trade) => (
+                      <tr key={trade.id}>
+                        <td>{formatDate(trade.date)}</td>
+                        <td>{trade.stock}</td>
+                        <td><span className={`status-badge ${trade.type === 'buy' ? 'status-active' : 'status-sold'}`}>{trade.type}</span></td>
+                        <td>{formatQuantity(toNumber(trade.qty))}</td>
+                        <td>{formatCurrency(toNumber(trade.price))}</td>
+                        <td className="actions">
+                          <button type="button" className="ghost-btn" onClick={() => onEdit(trade)}>Edit</button>
+                          <button type="button" className="danger-btn" onClick={() => onDelete(trade.id)}>Delete</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        </>
+      ) : null}
+
+      {activeTab === 'analytics' ? (
+        <section className="analytics-grid">
+          <article className="card panel analytics-card">
+            <p>Daily Change</p>
+            <h3 className={portfolio.totals.dailyPnl >= 0 ? 'metric-positive' : 'metric-negative'}>
+              {formatCurrency(portfolio.totals.dailyPnl)}
+            </h3>
+            <small>Based on latest market move vs previous close.</small>
+          </article>
+          <article className="card panel analytics-card">
+            <p>Best Performer</p>
+            <h3>{bestPerformer?.stock || '--'}</h3>
+            <small>{bestPerformer ? formatCurrency(bestPerformer.totalPnl) : 'Add trades to calculate this.'}</small>
+          </article>
+          <article className="card panel analytics-card">
+            <p>Worst Performer</p>
+            <h3>{worstPerformer?.stock || '--'}</h3>
+            <small>{worstPerformer ? formatCurrency(worstPerformer.totalPnl) : 'Add trades to calculate this.'}</small>
+          </article>
+          <article className="card panel analytics-card">
+            <p>Win Rate</p>
+            <h3>{formatPercent(portfolio.stocks.length ? portfolio.stocks.reduce((sum, stock) => sum + stock.winRate, 0) / portfolio.stocks.length : 0)}</h3>
+            <small>Realized sell entries closed in profit.</small>
+          </article>
+          <article className="card panel allocation-panel">
+            <div className="panel-head">
+              <h3>Portfolio Allocation</h3>
+              <small>Current value split by stock</small>
+            </div>
+            {portfolio.stocks.length === 0 ? (
+              <p className="empty">Allocation appears after you add positions.</p>
+            ) : (
+              <div className="allocation-list">
+                {portfolio.stocks.map((stock) => (
+                  <div key={stock.stock} className="allocation-row">
+                    <div className="allocation-label">
+                      <strong>{stock.stock}</strong>
+                      <span>{formatCurrency(stock.currentValue)}</span>
+                    </div>
+                    <div className="allocation-bar">
+                      <span style={{ width: `${Math.max(stock.allocationPercent, 4)}%` }} />
+                    </div>
+                    <small>{formatPercent(stock.allocationPercent)}</small>
+                  </div>
+                ))}
+              </div>
+            )}
+          </article>
+        </section>
+      ) : null}
+
+      {activeTab === 'alerts' ? (
+        <section className="card panel alerts-panel">
+          <h3>Alerts</h3>
+          <p className="empty">
+            Price alerts, profit alerts, and loss-cut rules are the next backend-ready layer. Your grouped stock detail flow is now in place, so this tab can connect cleanly to a future Supabase `alerts` table.
+          </p>
+        </section>
+      ) : null}
+    </>
+  )
+
+  const renderDetail = () => (
+    <>
+      <section className="breadcrumb-row">
+        <button type="button" className="breadcrumb-link" onClick={() => setSelectedStock(null)}>Dashboard</button>
+        <span className="breadcrumb-sep">&gt;</span>
+        <span>{selectedStockData.stock}</span>
+        <button type="button" className="ghost-btn" onClick={() => setSelectedStock(null)}>Back</button>
+      </section>
+
+      <section className="detail-hero">
+        <div className="detail-title">
+          <span className="stock-avatar stock-avatar-large">{getStockInitials(selectedStockData.stock)}</span>
+          <div>
+            <h2>{selectedStockData.stock}</h2>
+            <p>{formatQuantity(selectedStockData.sharesHeld)} shares held - {selectedStockData.entryCount} entries</p>
+          </div>
+        </div>
+        <div className="detail-actions">
+          <button type="button" className="primary-btn" onClick={() => openTradeModal(selectedStockData.stock)}>Add Entry</button>
+        </div>
+      </section>
+
+      <section className="detail-summary-grid">
+        <article className="card panel">
+          <p>Shares Held</p>
+          <h3>{formatQuantity(selectedStockData.sharesHeld)}</h3>
+        </article>
+        <article className="card panel">
+          <p>Avg Buy (WAP)</p>
+          <h3>{formatCurrency(selectedStockData.avgBuyPrice)}</h3>
+        </article>
+        <article className="card panel">
+          <p>Current Price</p>
+          <h3>{formatCurrency(selectedStockData.currentPrice)}</h3>
+        </article>
+        <article className="card panel">
+          <p>Unrealized P&amp;L</p>
+          <h3 className={selectedStockData.unrealizedPnl >= 0 ? 'metric-positive' : 'metric-negative'}>
+            {formatCurrency(selectedStockData.unrealizedPnl)}
+          </h3>
+        </article>
+      </section>
+
+      <section className="card panel">
+        <div className="panel-head">
+          <h3>Price history</h3>
+          <small>Entry prices and live market snapshot</small>
+        </div>
+        <LineChart stockData={selectedStockData} />
+      </section>
+
+      <section className="card panel">
+        <div className="panel-head">
+          <h3>Transaction log</h3>
+          <small>{selectedStockData.entryCount} entries for {selectedStockData.stock}</small>
+        </div>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Qty</th>
+                <th>Buy Price</th>
+                <th>Current</th>
+                <th>P&amp;L</th>
+                <th>P&amp;L %</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {selectedStockData.entries.map((entry) => (
+                <tr key={entry.id}>
+                  <td>{formatDate(entry.date)}</td>
+                  <td>
+                    <span className={`status-badge ${entry.type === 'buy' ? 'status-active' : 'status-sold'}`}>
+                      {entry.type}
+                    </span>
+                  </td>
+                  <td>
+                    {formatQuantity(entry.type === 'buy' ? entry.remainingQty || entry.qty : entry.qty)}
+                    {entry.type === 'buy' && entry.soldQty > 0 ? <small className="subtle-line"> / sold {formatQuantity(entry.soldQty)}</small> : null}
+                  </td>
+                  <td>{formatCurrency(entry.price)}</td>
+                  <td>{formatCurrency(entry.currentPrice)}</td>
+                  <td className={entry.pnl >= 0 ? 'metric-positive' : 'metric-negative'}>{formatCurrency(entry.pnl)}</td>
+                  <td className={entry.pnl >= 0 ? 'metric-positive' : 'metric-negative'}>{formatPercent(entry.pnlPercent)}</td>
+                  <td>
+                    <span className={`status-badge ${entry.status === 'active' ? 'status-active' : 'status-sold'}`}>
+                      {entry.status === 'active' ? 'Active' : 'Sold'}
+                    </span>
+                  </td>
+                  <td className="actions">
+                    <button type="button" className="ghost-btn" onClick={() => onEdit(entry)}>Edit</button>
+                    <button type="button" className="danger-btn" onClick={() => onDelete(entry.id)}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
+  )
 
   return (
     <main className="app-shell">
       <header className="topbar">
         <div>
           <p className="eyebrow">PortfolioX</p>
-          <h1>Stock Tracker & Trading Journal</h1>
+          <h1>Stock Tracker &amp; Trading Journal</h1>
           <p className="build-tag">Build marker: 2026-04-24</p>
         </div>
 
@@ -393,187 +1098,56 @@ function App() {
         ) : null}
       </header>
 
-      <section className="card panel auth-panel">
-        <div className="panel-head">
-          <div>
-            <h3>{user ? 'Your session is ready' : authMode === 'signIn' ? 'Sign In' : 'Create Account'}</h3>
-            <small>
-              {user
-                ? 'Trades will be saved under the authenticated Supabase user.'
-                : 'Use the email user you created in Supabase, or create a new one here.'}
-            </small>
-          </div>
-
-          {!user ? (
-            <button
-              type="button"
-              className="ghost-btn"
-              onClick={() => {
-                setAuthMode((prev) => (prev === 'signIn' ? 'signUp' : 'signIn'))
-                setAuthError('')
-                setAuthMessage('')
-              }}
-            >
-              {authMode === 'signIn' ? 'Need an account?' : 'Have an account?'}
-            </button>
-          ) : null}
-        </div>
-
-        {authLoading ? (
-          <p className="empty">Checking Supabase session...</p>
-        ) : user ? (
-          <p className="empty">You can now create, edit, and delete only your own trades.</p>
-        ) : (
-          <form className="trade-form auth-form-grid" onSubmit={submitAuth}>
-            <label>
-              Email
-              <input name="email" type="email" placeholder="divya1@test.email" value={authForm.email} onChange={onAuthChange} />
-            </label>
-            <label>
-              Password
-              <input name="password" type="password" placeholder="Enter password" value={authForm.password} onChange={onAuthChange} />
-            </label>
-            <button type="submit" className="primary-btn" disabled={authSubmitting}>
-              {authSubmitting ? 'Please wait...' : authMode === 'signIn' ? 'Sign In' : 'Create Account'}
-            </button>
-          </form>
-        )}
-
-        {authError ? <p className="error">{authError}</p> : null}
-        {authMessage ? <p className="success">{authMessage}</p> : null}
-      </section>
-
-      <section className="stats-grid" aria-label="Portfolio summary">
-        <article className="card">
-          <p>Total Value (est.)</p>
-          <h2>${stats.estimatedValue.toFixed(2)}</h2>
-          <span className="chip neutral">From current saved trades</span>
-        </article>
-        <article className="card">
-          <p>Invested</p>
-          <h2>${stats.invested.toFixed(2)}</h2>
-          <span className="chip neutral">Buy trades only</span>
-        </article>
-        <article className="card">
-          <p>Open Positions</p>
-          <h2>{stats.positions}</h2>
-          <span className="chip neutral">{session ? 'Scoped to your account' : 'Sign in to load trades'}</span>
-        </article>
-      </section>
+      {renderAuthPanel()}
 
       {error ? <p className="error">{error}</p> : null}
 
-      <section className="content-grid">
-        <article className="card panel">
-          <div className="panel-head">
-            <h3>Holdings</h3>
-            <small>{loading ? 'Loading...' : `${holdings.length} active`}</small>
-          </div>
+      {selectedStockData ? renderDetail() : renderDashboard()}
 
-          {!user ? (
-            <p className="empty">Sign in to load your holdings.</p>
-          ) : holdings.length === 0 ? (
-            <p className="empty">No holdings yet. Add your first trade to get started.</p>
-          ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Ticker</th>
-                  <th>Held Qty</th>
-                  <th>Avg Buy</th>
-                </tr>
-              </thead>
-              <tbody>
-                {holdings.map((holding) => (
-                  <tr key={holding.stock}>
-                    <td>{holding.stock}</td>
-                    <td>{holding.heldQty}</td>
-                    <td>${holding.avg.toFixed(2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </article>
+      {isTradeModalOpen ? (
+        <div className="modal-backdrop" onClick={closeTradeModal}>
+          <section className="modal-card" onClick={(event) => event.stopPropagation()}>
+            <div className="panel-head">
+              <div>
+                <h3>{editingId ? 'Update Entry' : 'Add Entry'}</h3>
+                <small>Buy and sell entries are grouped automatically inside the dashboard and stock detail view.</small>
+              </div>
+              <button type="button" className="ghost-btn" onClick={closeTradeModal}>Close</button>
+            </div>
 
-        <article className="card panel">
-          <div className="panel-head">
-            <h3>{editingId ? 'Edit Trade' : 'Create Trade'}</h3>
-            {editingId ? (
-              <button type="button" className="ghost-btn" onClick={resetTradeForm}>Cancel Edit</button>
-            ) : null}
-          </div>
-
-          <form className="trade-form" onSubmit={saveTrade}>
-            <label>
-              Ticker
-              <input name="stock" type="text" placeholder="AAPL" value={form.stock} onChange={onTradeChange} disabled={tradeFormDisabled} />
-            </label>
-            <label>
-              Quantity
-              <input name="qty" type="number" placeholder="1" min="0" max={MAX_DECIMAL_VALUE} step="0.0001" value={form.qty} onChange={onTradeChange} disabled={tradeFormDisabled} />
-            </label>
-            <label>
-              Price
-              <input name="price" type="number" placeholder="200" min="0" max={MAX_DECIMAL_VALUE} step="0.0001" value={form.price} onChange={onTradeChange} disabled={tradeFormDisabled} />
-            </label>
-            <label>
-              Type
-              <select name="type" value={form.type} onChange={onTradeChange} disabled={tradeFormDisabled}>
-                <option value="buy">Buy</option>
-                <option value="sell">Sell</option>
-              </select>
-            </label>
-            <label>
-              Date
-              <input name="date" type="date" value={form.date} onChange={onTradeChange} disabled={tradeFormDisabled} />
-            </label>
-            <button type="submit" className="primary-btn" disabled={tradeFormDisabled}>
-              {!user ? 'Sign In To Save' : saving ? 'Saving...' : editingId ? 'Update Trade' : 'Save Trade'}
-            </button>
-          </form>
-        </article>
-      </section>
-
-      <section className="card panel trade-list">
-        <div className="panel-head">
-          <h3>Trade History</h3>
+            <form className="trade-form modal-form" onSubmit={saveTrade}>
+              <label>
+                Stock Name
+                <input name="stock" type="text" placeholder="VEDL" value={form.stock} onChange={onTradeChange} disabled={saving} />
+              </label>
+              <label>
+                Quantity
+                <input name="qty" type="number" placeholder="1" min="0" max={MAX_DECIMAL_VALUE} step="0.0001" value={form.qty} onChange={onTradeChange} disabled={saving} />
+              </label>
+              <label>
+                Buy Price
+                <input name="price" type="number" placeholder="200" min="0" max={MAX_DECIMAL_VALUE} step="0.0001" value={form.price} onChange={onTradeChange} disabled={saving} />
+              </label>
+              <label>
+                Date
+                <input name="date" type="date" value={form.date} onChange={onTradeChange} disabled={saving} />
+              </label>
+              <label>
+                Transaction Type
+                <select name="type" value={form.type} onChange={onTradeChange} disabled={saving}>
+                  <option value="buy">Buy</option>
+                  <option value="sell">Sell</option>
+                </select>
+              </label>
+              <div className="modal-actions">
+                <button type="submit" className="primary-btn" disabled={saving}>
+                  {saving ? 'Saving...' : editingId ? 'Update Entry' : 'Save Entry'}
+                </button>
+              </div>
+            </form>
+          </section>
         </div>
-
-        {!user ? (
-          <p className="empty">Sign in to view your trade history.</p>
-        ) : trades.length === 0 ? (
-          <p className="empty">No entries yet.</p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Ticker</th>
-                <th>Type</th>
-                <th>Qty</th>
-                <th>Price</th>
-                <th>Date</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {trades.map((trade) => (
-                <tr key={trade.id}>
-                  <td>{trade.stock}</td>
-                  <td>{trade.type}</td>
-                  <td>{trade.qty}</td>
-                  <td>${toNumber(trade.price).toFixed(2)}</td>
-                  <td>{trade.date}</td>
-                  <td className="actions">
-                    <button type="button" className="ghost-btn" onClick={() => onEdit(trade)}>Edit</button>
-                    <button type="button" className="danger-btn" onClick={() => onDelete(trade.id)}>Delete</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
+      ) : null}
     </main>
   )
 }
