@@ -43,6 +43,17 @@ npm run dev
 
 Open the URL from terminal (usually `http://localhost:5173`).
 
+## Supabase permissions
+
+This version of the UI reads and writes `trades` through the Supabase REST API using the anon key from `.env`.
+
+If your Supabase project returns `permission denied for table trades`, the frontend is reaching your database correctly, but the `anon` role is not allowed to access that table yet. You need one of these:
+
+- Add `SELECT`, `INSERT`, `UPDATE`, and `DELETE` policies for the `anon` role on `trades`.
+- Or refactor the app to use authenticated Supabase sessions and policies tied to `auth.uid()`.
+
+Do not put the Supabase service-role key in the frontend.
+
 ## Commands
 
 ```bash

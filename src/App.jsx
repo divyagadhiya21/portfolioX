@@ -14,6 +14,16 @@ const defaultForm = {
 
 const toNumber = (v) => Number.parseFloat(v || 0)
 
+function getFriendlyErrorMessage(err) {
+  const rawMessage = err?.message || ''
+
+  if (rawMessage.toLowerCase().includes('permission denied for table trades')) {
+    return 'Supabase blocked access to the "trades" table. Add a public policy for the anon role, or switch this app to authenticated Supabase access before loading data.'
+  }
+
+  return rawMessage || 'Something went wrong while talking to Supabase.'
+}
+
 function aggregateHoldings(trades) {
   const map = {}
 
@@ -111,7 +121,7 @@ function App() {
       const data = await supabaseRequest('trades?select=*&order=date.desc')
       setTrades(Array.isArray(data) ? data : [])
     } catch (err) {
-      setError(err.message)
+      setError(getFriendlyErrorMessage(err))
     } finally {
       setLoading(false)
     }
@@ -167,7 +177,7 @@ function App() {
 
       resetForm()
     } catch (err) {
-      setError(err.message)
+      setError(getFriendlyErrorMessage(err))
     } finally {
       setSaving(false)
     }
@@ -191,7 +201,7 @@ function App() {
       setTrades((prev) => prev.filter((t) => t.id !== id))
       if (editingId === id) resetForm()
     } catch (err) {
-      setError(err.message)
+      setError(getFriendlyErrorMessage(err))
     }
   }
 
