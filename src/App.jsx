@@ -1,121 +1,119 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
 import './App.css'
 
+const holdings = [
+  { ticker: 'AAPL', qty: 12, avg: 189.3, ltp: 196.15 },
+  { ticker: 'MSFT', qty: 5, avg: 401.9, ltp: 414.22 },
+  { ticker: 'TSLA', qty: 8, avg: 172.45, ltp: 168.09 },
+]
+
+const alerts = [
+  { ticker: 'NVDA', condition: 'Above', price: 950 },
+  { ticker: 'AMZN', condition: 'Below', price: 180 },
+]
+
 function App() {
-  const [count, setCount] = useState(0)
-
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
+    <main className="app-shell">
+      <header className="topbar">
         <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
+          <p className="eyebrow">PortfolioX</p>
+          <h1>Stock Tracker & Trading Journal</h1>
         </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
+        <button type="button" className="primary-btn">+ Add Trade</button>
+      </header>
+
+      <section className="stats-grid" aria-label="Portfolio summary">
+        <article className="card">
+          <p>Total Value</p>
+          <h2>$19,842.43</h2>
+          <span className="chip positive">+2.48% today</span>
+        </article>
+        <article className="card">
+          <p>Invested</p>
+          <h2>$18,990.00</h2>
+          <span className="chip neutral">3 open positions</span>
+        </article>
+        <article className="card">
+          <p>Unrealized P&L</p>
+          <h2>$852.43</h2>
+          <span className="chip positive">+$412 this week</span>
+        </article>
       </section>
 
-      <div className="ticks"></div>
+      <section className="content-grid">
+        <article className="card panel">
+          <div className="panel-head">
+            <h3>Holdings</h3>
+            <small>Live prices every 60 sec</small>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th>Qty</th>
+                <th>Avg</th>
+                <th>LTP</th>
+                <th>P&L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {holdings.map((h) => {
+                const pnl = (h.ltp - h.avg) * h.qty
+                const isUp = pnl >= 0
+                return (
+                  <tr key={h.ticker}>
+                    <td>{h.ticker}</td>
+                    <td>{h.qty}</td>
+                    <td>${h.avg.toFixed(2)}</td>
+                    <td>${h.ltp.toFixed(2)}</td>
+                    <td className={isUp ? 'up' : 'down'}>
+                      {isUp ? '+' : '-'}${Math.abs(pnl).toFixed(2)}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </article>
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
+        <aside className="side-col">
+          <article className="card panel">
+            <div className="panel-head">
+              <h3>Create Trade</h3>
+              <small>UI scaffold</small>
+            </div>
+            <form className="trade-form" onSubmit={(e) => e.preventDefault()}>
+              <label>
+                Ticker
+                <input type="text" placeholder="AAPL" />
+              </label>
+              <label>
+                Quantity
+                <input type="number" placeholder="10" />
+              </label>
+              <label>
+                Price
+                <input type="number" placeholder="190.25" step="0.01" />
+              </label>
+              <button type="submit" className="primary-btn">Save Trade</button>
+            </form>
+          </article>
+
+          <article className="card panel">
+            <div className="panel-head">
+              <h3>Price Alerts</h3>
+            </div>
+            <ul className="alerts">
+              {alerts.map((a) => (
+                <li key={`${a.ticker}-${a.condition}`}>
+                  <strong>{a.ticker}</strong> {a.condition} ${a.price}
+                </li>
+              ))}
+            </ul>
+          </article>
+        </aside>
       </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+    </main>
   )
 }
 
