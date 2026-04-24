@@ -1,16 +1,53 @@
-# React + Vite
+# PortfolioX
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+PortfolioX is a React + Vite stock tracking app.
 
-Currently, two official plugins are available:
+## Current app behavior
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- Trade CRUD UI is in `src/App.jsx` (create, edit, delete).
+- Holdings + summary cards are derived from saved trades.
+- Data is read/written to Supabase REST using:
+  - `VITE_SUPABASE_URL`
+  - `VITE_SUPABASE_ANON_KEY`
 
-## React Compiler
+## Why you may still see old UI on `http://localhost:4173`
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+`npm run preview` serves the `dist/` build output. If `dist/` was built earlier, preview can show older UI.
 
-## Expanding the ESLint configuration
+To avoid this, this repo now runs **build + preview together** when you use:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```bash
+npm run preview
+```
+
+## Setup
+
+1. Create env file:
+
+```bash
+cp .env.example .env
+```
+
+2. Fill:
+
+- `VITE_SUPABASE_URL`
+- `VITE_SUPABASE_ANON_KEY`
+- `VITE_FINNHUB_API_KEY`
+
+3. Run locally:
+
+```bash
+npm install
+npm run dev
+```
+
+Open the URL from terminal (usually `http://localhost:5173`).
+
+## Commands
+
+```bash
+npm run dev
+npm run build
+npm run lint
+npm run preview
+```
