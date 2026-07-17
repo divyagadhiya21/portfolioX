@@ -6,9 +6,8 @@ PortfolioX is a React + Vite stock tracking app.
 
 - Trade CRUD UI is in `src/App.jsx` (create, edit, delete).
 - Holdings + summary cards are derived from saved trades.
-- Data is read/written to Supabase REST using:
-  - `VITE_SUPABASE_URL`
-  - `VITE_SUPABASE_ANON_KEY`
+- Auth and data are backed by Firebase (Email/Password Auth + Firestore). See `FIREBASE_SETUP.md`.
+- Trades are stored per-user at `users/{uid}/trades/{tradeId}`.
 
 ## Why you may still see old UI on `http://localhost:4173`
 
@@ -30,11 +29,17 @@ cp .env.example .env
 
 2. Fill:
 
-- `VITE_SUPABASE_URL`
-- `VITE_SUPABASE_ANON_KEY`
+- `VITE_FIREBASE_API_KEY`
+- `VITE_FIREBASE_AUTH_DOMAIN`
+- `VITE_FIREBASE_PROJECT_ID`
+- `VITE_FIREBASE_STORAGE_BUCKET`
+- `VITE_FIREBASE_MESSAGING_SENDER_ID`
+- `VITE_FIREBASE_APP_ID`
 - `VITE_FINNHUB_API_KEY`
 - `VITE_TWELVEDATA_API_KEY` for better TSX live price coverage
 - `VITE_GOOGLE_SHEETS_QUOTES_URL` for a free Google Sheets price feed
+
+See `FIREBASE_SETUP.md` for the one-time Firebase console step (enabling Email/Password auth).
 
 3. Run locally:
 
@@ -57,16 +62,11 @@ Your Apps Script web app should support:
 - `GET` to return rows as JSON
 - `POST` with `{ "symbol": "MDA", "google_symbol": "TSE:MDA" }` to append the symbol if it does not already exist
 
-## Supabase permissions
+## Firestore permissions
 
-This version of the UI reads and writes `trades` through the Supabase REST API using the anon key from `.env`.
+Trades are read/written through the Firestore client SDK, scoped to `users/{uid}/trades/{tradeId}`. `firestore.rules` only allows a signed-in user to read/write their own `users/{uid}` subtree — see `FIREBASE_SETUP.md`.
 
-If your Supabase project returns `permission denied for table trades`, the frontend is reaching your database correctly, but the `anon` role is not allowed to access that table yet. You need one of these:
-
-- Add `SELECT`, `INSERT`, `UPDATE`, and `DELETE` policies for the `anon` role on `trades`.
-- Or refactor the app to use authenticated Supabase sessions and policies tied to `auth.uid()`.
-
-Do not put the Supabase service-role key in the frontend.
+If you see `permission-denied` errors, confirm you are signed in and that `firestore.rules` has been deployed (`npm run deploy` or `firebase deploy --only firestore:rules`).
 
 ## Commands
 
@@ -75,4 +75,6 @@ npm run dev
 npm run build
 npm run lint
 npm run preview
+npm run deploy          # build + deploy hosting and firestore rules
+npm run deploy:hosting  # build + deploy hosting only
 ```

@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "deploy": "npm run build && %APPDATA%\\npm\\firebase.cmd deploy --only hosting,firestore:rules",
+    "deploy:hosting": "npm run build && %APPDATA%\\npm\\firebase.cmd deploy --only hosting",
     "lint": "eslint .",
     "preview": "npm run build && vite preview"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.104.1",
+    "firebase": "^12.6.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },

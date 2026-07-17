@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
-import { supabase } from './services/supabase'
+import {
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut as firebaseSignOut,
+} from 'firebase/auth'
+import { addDoc, collection, deleteDoc, doc, getDocs, updateDoc } from 'firebase/firestore'
+import { firebaseAuth, firestoreDb } from './config/firebase'
 import { fetchMultiplePrices, fetchStockPrice, getDisplayTicker, searchCanadianStocks, syncGoogleSheetsSymbol, toTsxSymbol } from './services/finnhub'
 
 const MAX_DECIMAL_VALUE = 99999999
@@ -68,24 +75,30 @@ function formatDate(value) {
 }
 
 function getFriendlyErrorMessage(error) {
+  const code = error?.code || ''
   const rawMessage = error?.message || ''
-  const details = error?.details ? ` Details: ${error.details}` : ''
-  const hint = error?.hint ? ` Hint: ${error.hint}` : ''
-  const code = error?.code ? ` [${error.code}]` : ''
 
-  if (rawMessage.toLowerCase().includes('invalid login credentials')) {
-    return 'Invalid email or password. Use the Supabase user you created, or create a new account.'
+  if (code === 'auth/email-already-in-use') {
+    return 'An account already exists for this email. Sign in instead.'
   }
 
-  if (rawMessage.toLowerCase().includes('email not confirmed')) {
-    return 'Email confirmation is still required for this account. Confirm the user in Supabase Auth before signing in.'
+  if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
+    return 'Invalid email or password.'
   }
 
-  if (rawMessage.toLowerCase().includes('permission denied')) {
-    return `Supabase is still blocking this request.${code} ${rawMessage}${details}${hint}`.trim()
+  if (code === 'auth/weak-password') {
+    return 'Password should be at least 6 characters.'
   }
 
-  return `${rawMessage}${details}${hint}`.trim() || 'Something went wrong while talking to Supabase.'
+  if (code === 'auth/operation-not-allowed') {
+    return 'Email/password sign-in is not enabled in Firebase Authentication.'
+  }
+
+  if (code === 'permission-denied') {
+    return `Firestore is still blocking this request. [${code}] ${rawMessage}`.trim()
+  }
+
+  return rawMessage || 'Something went wrong while talking to Firebase.'
 }
 
 function isValidDecimalInput(value) {
@@ -465,40 +478,13 @@ function App() {
   }, null)
 
   useEffect(() => {
-    let active = true
-
-    async function restoreSession() {
-      try {
-        const { data, error: sessionError } = await supabase.auth.getSession()
-        if (sessionError) throw sessionError
-
-        if (!active) return
-
-        setUser(data.session?.user ?? null)
-      } catch (err) {
-        console.error('Supabase session restore failed:', err)
-        if (active) {
-          setAuthError(getFriendlyErrorMessage(err))
-        }
-      } finally {
-        if (active) {
-          setAuthLoading(false)
-        }
-      }
-    }
-
-    void restoreSession()
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setUser(nextSession?.user ?? null)
+    const unsubscribe = onAuthStateChanged(firebaseAuth, (nextUser) => {
+      setUser(nextUser)
       setAuthLoading(false)
       setError('')
     })
 
-    return () => {
-      active = false
-      subscription.unsubscribe()
-    }
+    return unsubscribe
   }, [])
 
   useEffect(() => {
@@ -515,19 +501,15 @@ function App() {
         setLoading(true)
         setError('')
 
-        const { data, error: loadError } = await supabase
-          .from('trades')
-          .select('*')
-          .eq('user_id', user.id)
-          .order('date', { ascending: false })
+        const snapshot = await getDocs(collection(firestoreDb, 'users', user.uid, 'trades'))
+        const nextTrades = snapshot.docs.map((tradeDoc) => ({ id: tradeDoc.id, ...tradeDoc.data() }))
 
-        if (loadError) throw loadError
         if (!cancelled) {
-          setTrades(Array.isArray(data) ? data : [])
+          setTrades(nextTrades)
           setHistoryPage(1)
         }
       } catch (err) {
-        console.error('Supabase trades load failed:', err)
+        console.error('Firestore trades load failed:', err)
         if (!cancelled) {
           setError(getFriendlyErrorMessage(err))
         }
@@ -713,29 +695,16 @@ function App() {
       setAuthMessage('')
 
       if (authMode === 'signUp') {
-        const { error: signUpError } = await supabase.auth.signUp({
-          email: authForm.email,
-          password: authForm.password,
-        })
-
-        if (signUpError) throw signUpError
-
-        setAuthMessage('Account created. If email confirmation is enabled, confirm the email and then sign in.')
-        setAuthMode('signIn')
+        await createUserWithEmailAndPassword(firebaseAuth, authForm.email, authForm.password)
+        setAuthMessage('Account created and signed in.')
       } else {
-        const { error: signInError } = await supabase.auth.signInWithPassword({
-          email: authForm.email,
-          password: authForm.password,
-        })
-
-        if (signInError) throw signInError
-
+        await signInWithEmailAndPassword(firebaseAuth, authForm.email, authForm.password)
         setAuthMessage('Signed in successfully.')
       }
 
       setAuthForm(defaultAuthForm)
     } catch (err) {
-      console.error('Supabase auth submit failed:', err)
+      console.error('Firebase auth submit failed:', err)
       setAuthError(getFriendlyErrorMessage(err))
     } finally {
       setAuthSubmitting(false)
@@ -747,12 +716,11 @@ function App() {
       setAuthError('')
       setAuthMessage('')
       setError('')
-      const { error: signOutError } = await supabase.auth.signOut()
-      if (signOutError) throw signOutError
+      await firebaseSignOut(firebaseAuth)
       setSelectedStock(null)
       closeTradeModal()
     } catch (err) {
-      console.error('Supabase sign out failed:', err)
+      console.error('Firebase sign out failed:', err)
       setAuthError(getFriendlyErrorMessage(err))
     }
   }
@@ -810,27 +778,15 @@ function App() {
       setError('')
 
       if (editingId) {
-        const { data, error: updateError } = await supabase
-          .from('trades')
-          .update(payload)
-          .eq('id', editingId)
-          .eq('user_id', user.id)
-          .select()
-          .single()
+        const tradeRef = doc(firestoreDb, 'users', user.uid, 'trades', editingId)
+        await updateDoc(tradeRef, payload)
 
-        if (updateError) throw updateError
-
-        setTrades((prev) => prev.map((trade) => (trade.id === editingId ? data : trade)))
+        setTrades((prev) => prev.map((trade) => (trade.id === editingId ? { ...trade, ...payload } : trade)))
       } else {
-        const { data, error: insertError } = await supabase
-          .from('trades')
-          .insert([{ ...payload, user_id: user.id }])
-          .select()
-          .single()
+        const tradesRef = collection(firestoreDb, 'users', user.uid, 'trades')
+        const newTradeRef = await addDoc(tradesRef, payload)
 
-      if (insertError) throw insertError
-
-        setTrades((prev) => [data, ...prev])
+        setTrades((prev) => [{ id: newTradeRef.id, ...payload }, ...prev])
       }
 
       const didSyncSheet = await syncGoogleSheetsSymbol(stock)
@@ -853,7 +809,7 @@ function App() {
       setDetailPage(1)
       closeTradeModal()
     } catch (err) {
-      console.error('Supabase save trade failed:', err)
+      console.error('Firestore save trade failed:', err)
       setError(getFriendlyErrorMessage(err))
     } finally {
       setSaving(false)
@@ -879,20 +835,14 @@ function App() {
     try {
       setError('')
 
-      const { error: deleteError } = await supabase
-        .from('trades')
-        .delete()
-        .eq('id', id)
-        .eq('user_id', user.id)
-
-      if (deleteError) throw deleteError
+      await deleteDoc(doc(firestoreDb, 'users', user.uid, 'trades', id))
 
       setTrades((prev) => prev.filter((trade) => trade.id !== id))
       if (editingId === id) {
         closeTradeModal()
       }
     } catch (err) {
-      console.error('Supabase delete trade failed:', err)
+      console.error('Firestore delete trade failed:', err)
       setError(getFriendlyErrorMessage(err))
     }
   }
@@ -904,8 +854,8 @@ function App() {
           <h3>{user ? 'Your session is ready' : authMode === 'signIn' ? 'Sign In' : 'Create Account'}</h3>
           <small>
             {user
-              ? 'Trades sync instantly to your Supabase account and stay isolated per user.'
-              : 'Use the Supabase user you created, or create a new account here.'}
+              ? 'Trades sync instantly to your Firebase account and stay isolated per user.'
+              : 'Sign in with your Firebase account, or create a new account here.'}
           </small>
         </div>
 
@@ -929,7 +879,7 @@ function App() {
       </div>
 
       {authLoading ? (
-        <p className="empty">Checking Supabase session...</p>
+        <p className="empty">Checking Firebase session...</p>
       ) : user ? (
         <div className="session-inline">
           <span className="status-badge status-active">Live sync enabled</span>
@@ -1120,7 +1070,7 @@ function App() {
         <section className="card panel alerts-panel">
           <h3>Alerts</h3>
           <p className="empty">
-            Price alerts, profit alerts, and loss-cut rules are the next backend-ready layer. Your grouped stock detail flow is now in place, so this tab can connect cleanly to a future Supabase `alerts` table.
+            Price alerts, profit alerts, and loss-cut rules are the next backend-ready layer. Your grouped stock detail flow is now in place, so this tab can connect cleanly to a future Firestore `alerts` collection.
           </p>
         </section>
       ) : null}
